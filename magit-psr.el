@@ -137,7 +137,7 @@
 (defun magit-psr-jump-to-item (&optional item)
   "Jump to the PSR error ITEM at point."
   (interactive)
-  (let* ((item (or item (oref (magit-current-section) value)))
+  (let* ((item (or item (get-text-property (point) 'magit-psr-item)))
          (filename (magit-psr-item-filename item))
          (line (magit-psr-item-line item))
          (column (magit-psr-item-column item)))
@@ -245,13 +245,16 @@
                    (column (magit-psr-item-column item))
                    (line-str (format ":%s:%s" line column)))
               (magit-insert-section ((psr-item item) :keymap magit-psr-section-map)
-                (insert
-                 (propertize line-str 'face 'magit-line-number 'font-lock-face 'magit-line-number)
-                 " "
-                 (propertize (format "[%s]" type) 'face type-face 'font-lock-face type-face)
-                 " "
-                 message
-                 "\n")))))))))
+                (let ((start (point)))
+                  (insert
+                   (propertize line-str 'face 'magit-line-number 'font-lock-face 'magit-line-number)
+                   " "
+                   (propertize (format "[%s]" type) 'face type-face 'font-lock-face type-face)
+                   " "
+                   message
+                   "\n")
+                  (put-text-property start (point) 'magit-psr-item item)
+                   (put-text-property start (point) 'keymap magit-psr-section-map))))))))))
 
 ;;;; Scanning
 
@@ -259,56 +262,67 @@
   "Find PHP files in DIRECTORY using git ls-files.
 Respects `magit-psr-exclude-globs' and `magit-psr-depth'."
   (let* ((default-directory directory)
-         (files (split-string (magit-git-string "ls-files" "*.php") "\n" t))
+         (all-files (magit-psr--git-ls-files))
+         (php-files (seq-filter (lambda (f) (string-suffix-p ".php" f t)) all-files))
          (glob-regexps (mapcar #'wildcard-to-regexp magit-psr-exclude-globs))
          (filtered (cl-remove-if (lambda (file)
-                                   (cl-some (lambda (r) (string-match-p r file)) glob-regexps))
-                                 files)))
+                                    (cl-some (lambda (r) (string-match-p r file)) glob-regexps))
+                                  php-files)))
     (if magit-psr-depth
         (cl-remove-if-not (lambda (f) (<= (cl-count ?/ f) magit-psr-depth)) filtered)
       filtered)))
+
+(defun magit-psr--git-ls-files ()
+  "Return list of tracked and untracked (non-ignored) files in the git repo."
+  (let ((git (if (boundp 'magit-git-executable) magit-git-executable "git")))
+    (with-temp-buffer
+      (when (= (call-process git nil t nil
+                             "ls-files" "--cached" "--others" "--exclude-standard")
+               0)
+        (split-string (buffer-string) "\n" t)))))
 
 (defun magit-psr--scan ()
   "Run phpcs and return list of `magit-psr-item' structs."
   (let* ((default-directory (magit-toplevel))
          (files (magit-psr--find-php-files default-directory)))
-    (unless files
-      (message "magit-psr: No PHP files found")
-      (cl-return-from magit-psr--scan nil))
-    (let* ((args (append (list magit-psr-executable
-                               "--report=json"
-                               (format "--standard=%s" magit-psr-standard)
-                               "-s")
-                         magit-psr-phpcs-args
-                         files))
-           (command (mapconcat #'shell-quote-argument args " "))
-           (output (shell-command-to-string command))
-           (json-data (condition-case nil
-                          (magit-psr--json-read output)
-                        (error
-                         (message "magit-psr: Failed to parse phpcs output")
-                         nil)))
-           (items nil))
-      (when json-data
-        (let* ((files-table (magit-psr--json-get json-data "files")))
-          (when files-table
-            (magit-psr--json-each
-             files-table
-             (lambda (filename file-data)
-               (let ((messages (magit-psr--json-get file-data "messages")))
-                 (dolist (msg messages)
-                   (let ((type (magit-psr--json-get msg "type")))
-                     (when (or magit-psr-show-warnings (string= type "ERROR"))
-                       (let* ((relative (file-relative-name filename default-directory))
-                              (item (make-magit-psr-item
-                                     :filename relative
-                                     :line (magit-psr--json-get msg "line")
-                                     :column (magit-psr--json-get msg "column")
-                                     :message (magit-psr--json-get msg "message")
-                                     :source (magit-psr--json-get msg "source")
-                                     :type type)))
-                         (push item items))))))))))
-      (nreverse items)))))
+    (if (not files)
+        (progn
+          (message "magit-psr: No PHP files found")
+          nil)
+      (let* ((args (append (list magit-psr-executable
+                                 "--report=json"
+                                 (format "--standard=%s" magit-psr-standard)
+                                 "-s")
+                           magit-psr-phpcs-args
+                           files))
+             (command (mapconcat #'shell-quote-argument args " "))
+             (output (shell-command-to-string command))
+             (json-data (condition-case nil
+                            (magit-psr--json-read output)
+                          (error
+                           (message "magit-psr: Failed to parse phpcs output")
+                           nil)))
+             (items nil))
+        (when json-data
+          (let* ((files-table (magit-psr--json-get json-data "files")))
+            (when files-table
+              (magit-psr--json-each
+               files-table
+               (lambda (filename file-data)
+                 (let ((messages (magit-psr--json-get file-data "messages")))
+                   (dolist (msg messages)
+                     (let ((type (magit-psr--json-get msg "type")))
+                       (when (or magit-psr-show-warnings (string= type "ERROR"))
+                         (let* ((relative (file-relative-name filename default-directory))
+                                (item (make-magit-psr-item
+                                       :filename relative
+                                       :line (magit-psr--json-get msg "line")
+                                       :column (magit-psr--json-get msg "column")
+                                       :message (magit-psr--json-get msg "message")
+                                       :source (magit-psr--json-get msg "source")
+                                       :type type)))
+                           (push item items))))))))))
+        (nreverse items))))))
 
 ;;;;; JSON parsing helpers
 
