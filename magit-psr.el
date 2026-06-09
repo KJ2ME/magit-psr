@@ -1,0 +1,349 @@
+;;; magit-psr.el --- Show PHP PSR errors in Magit  -*- lexical-binding: t; -*-
+
+;; Copyright (C) 2024
+
+;; Author: kj <webmaste@outcontrol.net>
+;; URL: https://github.com/KJ2ME/magit-psr
+;; Version: 0.1
+;; Package-Requires: ((emacs "26.1") (magit "2.13.0"))
+;; Keywords: magit, php, psr
+
+;; This program is free software; you can redistribute it and/or modify
+;; it under the terms of the GNU General Public License as published by
+;; the Free Software Foundation, either version 3 of the License, or
+;; (at your option) any later version.
+
+;; This program is distributed in the hope that it will be useful,
+;; but WITHOUT ANY WARRANTY; without even the implied warranty of
+;; MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;; GNU General Public License for more details.
+
+;; You should have received a copy of the GNU General Public License
+;; along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+;;; Commentary:
+
+;; This package displays PHP PSR errors from phpcs in the Magit
+;; status buffer.  Activating an item jumps to the error in its file.
+;;
+;; Usage:
+;; Run `magit-psr-mode', then open a Magit status buffer.
+
+;;; Code:
+
+(require 'json)
+(require 'seq)
+(require 'magit)
+
+;;;; Customization
+
+(defgroup magit-psr nil
+  "Show PHP PSR errors in Magit status buffer."
+  :group 'magit)
+
+(defcustom magit-psr-executable "phpcs"
+  "Path to the phpcs executable."
+  :type 'string)
+
+(defcustom magit-psr-standard "PSR12"
+  "PHPCS coding standard to check against."
+  :type 'string)
+
+(defcustom magit-psr-max-items 20
+  "Automatically collapse the section if there are more than this many items."
+  :type 'integer)
+
+(defcustom magit-psr-insert-after '(bottom)
+  "Where to insert the PSR section in the Magit status buffer."
+  :type '(repeat (choice (const :tag "Top" top)
+                         (const :tag "Bottom" bottom)
+                         (const :tag "Recent commits" unpushed)
+                         (const :tag "Untracked files" untracked)
+                         (const :tag "Unstaged files" unstaged)
+                         (const :tag "Staged files" staged)
+                         (const :tag "Stashes" stashes)
+                         (symbol :tag "Specified section"))))
+
+(defcustom magit-psr-show-warnings nil
+  "If non-nil, show warnings in addition to errors."
+  :type 'boolean)
+
+(defcustom magit-psr-exclude-globs '("vendor/" "node_modules/")
+  "Glob patterns to exclude from phpcs scans."
+  :type '(repeat string))
+
+(defcustom magit-psr-depth nil
+  "Maximum depth of files to scan.  nil means unlimited."
+  :type '(choice (const :tag "Unlimited" nil)
+                 (integer :tag "N levels")))
+
+(defcustom magit-psr-phpcs-args nil
+  "Additional arguments to pass to phpcs."
+  :type '(repeat string))
+
+;;;; Structs
+
+(cl-defstruct magit-psr-item
+  filename line column message source severity type)
+
+;;;; Variables
+
+(defvar-local magit-psr-item-cache nil
+  "Items found by most recent scan.")
+
+(defvar-local magit-psr-last-update-time nil
+  "When the items were last updated.")
+
+(defvar-local magit-psr-updating nil
+  "Whether items are being updated now.")
+
+(defvar magit-psr-section-heading "PSR"
+  "Allows overriding of section heading.")
+
+(defvar magit-psr-section-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map [remap magit-visit-thing] #'magit-psr-jump-to-item)
+    (define-key map (kbd "RET") #'magit-psr-jump-to-item)
+    map)
+  "Keymap for `magit-psr' item sections.")
+
+;;;; Mode
+
+;;;###autoload
+(define-minor-mode magit-psr-mode
+  "Show PHP PSR errors in Magit status buffer for PHP files in repo."
+  :require 'magit-psr
+  :group 'magit-psr
+  :global t
+  (if magit-psr-mode
+      (magit-add-section-hook 'magit-status-sections-hook
+                              #'magit-psr--insert
+                              nil
+                              'append)
+    (remove-hook 'magit-status-sections-hook #'magit-psr--insert)))
+
+;;;; Commands
+
+(defun magit-psr-update ()
+  "Update the PSR error list manually."
+  (interactive)
+  (unless magit-psr-mode
+    (user-error "Please activate `magit-psr-mode'"))
+  (let ((inhibit-read-only t))
+    (magit-psr--delete-section [* psr])
+    (setq magit-psr-updating t)
+    (magit-psr--insert)))
+
+(defun magit-psr-jump-to-item (&optional item)
+  "Jump to the PSR error ITEM at point."
+  (interactive)
+  (let* ((item (or item (oref (magit-current-section) value)))
+         (filename (magit-psr-item-filename item))
+         (line (magit-psr-item-line item))
+         (column (magit-psr-item-column item)))
+    (find-file filename)
+    (goto-char (point-min))
+    (forward-line (1- line))
+    (when column
+      (forward-char (1- column)))))
+
+;;;; Sections
+
+(defun magit-psr--delete-section (condition)
+  "Delete the section specified by CONDITION."
+  (save-excursion
+    (goto-char (point-min))
+    (when-let ((section (cl-loop until (magit-section-match condition)
+                                 do (forward-line 1)
+                                 when (eobp)
+                                 return nil
+                                 finally return (magit-current-section))))
+      (object-remove-from-list magit-root-section 'children section)
+      (with-slots (start end) section
+        (delete-region start (if (= end (point-max)) end (1+ end)))))))
+
+(defun magit-psr--section-end (condition)
+  "Return end position of section matching CONDITION."
+  (save-excursion
+    (goto-char (point-min))
+    (pcase condition
+      ('top (when-let ((section (or (magit-get-section (app (lambda (s) (oref s type)) (or 'tag 'tags 'branch)))
+                                    (magit-get-section (cadr (oref magit-root-section children))))))
+              (1+ (oref section end))))
+      ('bottom (oref (car (last (oref magit-root-section children))) end))
+      (_ (when-let ((section (magit-get-section condition)))
+           (oref section end))))))
+
+(defun magit-psr--insert ()
+  "Insert PSR error items into current Magit status buffer."
+  (when (or magit-psr-updating
+            (not (file-remote-p default-directory)))
+    (if (or (eq magit-psr-updating t)
+            (null magit-psr-last-update-time))
+        (progn
+          (setq magit-psr-updating t)
+          (let ((items (magit-psr--scan)))
+            (magit-psr--insert-items (current-buffer) items)))
+      (magit-psr--insert-items (current-buffer) magit-psr-item-cache))))
+
+(cl-defun magit-psr--insert-items (buffer items)
+  "Insert PSR ITEMS into BUFFER."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (let* ((num-items (length items))
+             (magit-section-show-child-count t)
+             (magit-insert-section--parent magit-root-section)
+             (inhibit-read-only t))
+        (when magit-psr-updating
+          (setq magit-psr-item-cache items
+                magit-psr-last-update-time (current-time)
+                magit-psr-updating nil))
+        (save-excursion
+          (goto-char (point-min))
+          (goto-char (or (cl-loop for section in magit-psr-insert-after
+                                  for pos = (magit-psr--section-end section)
+                                  when pos return pos)
+                         (magit-psr--section-end 'bottom)))
+          (if (not items)
+              (let ((magit-insert-section--parent magit-root-section))
+                (magit-insert-section (psr)
+                  (magit-insert-heading
+                   (concat (propertize magit-psr-section-heading
+                                       'face 'magit-section-heading
+                                       'font-lock-face 'magit-section-heading)
+                           " (0)\n"))))
+            (let ((section (magit-insert-section (psr)
+                             (magit-insert-heading
+                              (format "%s (%s)"
+                                      (propertize magit-psr-section-heading
+                                                  'face 'magit-section-heading
+                                                  'font-lock-face 'magit-section-heading)
+                                      num-items))
+                             (magit-psr--insert-groups items)
+                             (insert "\n"))))
+              (push section (oref magit-root-section children))
+              (if (> num-items magit-psr-max-items)
+                  (magit-section-hide section)
+                (magit-section-show section)))))))))
+
+(defun magit-psr--insert-groups (items)
+  "Insert grouped PSR ITEMS by filename."
+  (let* ((groups (seq-group-by #'magit-psr-item-filename items))
+         (sorted-groups (sort groups (lambda (a b) (string< (car a) (car b))))))
+    (dolist (group sorted-groups)
+      (let ((filename (car group))
+            (file-items (cdr group)))
+        (magit-insert-section ((eval (intern filename)))
+          (magit-insert-heading
+           (concat (propertize filename 'face 'magit-filename 'font-lock-face 'magit-filename)
+                   (format " (%s)" (length file-items))))
+          (dolist (item file-items)
+            (let* ((type (magit-psr-item-type item))
+                   (type-face (if (string= type "ERROR") 'error 'warning))
+                   (message (magit-psr-item-message item))
+                   (line (magit-psr-item-line item))
+                   (column (magit-psr-item-column item))
+                   (line-str (format ":%s:%s" line column)))
+              (magit-insert-section ((psr-item item) :keymap magit-psr-section-map)
+                (insert
+                 (propertize line-str 'face 'magit-line-number 'font-lock-face 'magit-line-number)
+                 " "
+                 (propertize (format "[%s]" type) 'face type-face 'font-lock-face type-face)
+                 " "
+                 message
+                 "\n")))))))))
+
+;;;; Scanning
+
+(defun magit-psr--find-php-files (directory)
+  "Find PHP files in DIRECTORY using git ls-files.
+Respects `magit-psr-exclude-globs' and `magit-psr-depth'."
+  (let* ((default-directory directory)
+         (files (split-string (magit-git-string "ls-files" "*.php") "\n" t))
+         (glob-regexps (mapcar #'wildcard-to-regexp magit-psr-exclude-globs))
+         (filtered (cl-remove-if (lambda (file)
+                                   (cl-some (lambda (r) (string-match-p r file)) glob-regexps))
+                                 files)))
+    (if magit-psr-depth
+        (cl-remove-if-not (lambda (f) (<= (cl-count ?/ f) magit-psr-depth)) filtered)
+      filtered)))
+
+(defun magit-psr--scan ()
+  "Run phpcs and return list of `magit-psr-item' structs."
+  (let* ((default-directory (magit-toplevel))
+         (files (magit-psr--find-php-files default-directory)))
+    (unless files
+      (message "magit-psr: No PHP files found")
+      (cl-return-from magit-psr--scan nil))
+    (let* ((args (append (list magit-psr-executable
+                               "--report=json"
+                               (format "--standard=%s" magit-psr-standard)
+                               "-s")
+                         magit-psr-phpcs-args
+                         files))
+           (command (mapconcat #'shell-quote-argument args " "))
+           (output (shell-command-to-string command))
+           (json-data (condition-case nil
+                          (magit-psr--json-read output)
+                        (error
+                         (message "magit-psr: Failed to parse phpcs output")
+                         nil)))
+           (items nil))
+      (when json-data
+        (let* ((files-table (magit-psr--json-get json-data "files")))
+          (when files-table
+            (magit-psr--json-each
+             files-table
+             (lambda (filename file-data)
+               (let ((messages (magit-psr--json-get file-data "messages")))
+                 (dolist (msg messages)
+                   (let ((type (magit-psr--json-get msg "type")))
+                     (when (or magit-psr-show-warnings (string= type "ERROR"))
+                       (let* ((relative (file-relative-name filename default-directory))
+                              (item (make-magit-psr-item
+                                     :filename relative
+                                     :line (magit-psr--json-get msg "line")
+                                     :column (magit-psr--json-get msg "column")
+                                     :message (magit-psr--json-get msg "message")
+                                     :source (magit-psr--json-get msg "source")
+                                     :type type)))
+                         (push item items))))))))))
+      (nreverse items)))))
+
+;;;;; JSON parsing helpers
+
+(defun magit-psr--json-read (string)
+  "Read JSON from STRING.
+Uses `json-parse-string' if available, otherwise falls back to
+`json-read-from-string'."
+  (if (fboundp 'json-parse-string)
+      (json-parse-string string :object-type 'hash-table :array-type 'list)
+    (with-temp-buffer
+      (insert string)
+      (goto-char (point-min))
+      (json-read))))
+
+(defun magit-psr--json-get (object key)
+  "Get KEY from OBJECT.
+OBJECT may be a hash-table or an alist.
+KEY is a string.  When OBJECT is an alist (from json.el), the key
+may be interned as a symbol, so we try both."
+  (pcase object
+    ((pred hash-table-p) (gethash key object))
+    ((pred consp) (or (alist-get key object nil nil #'equal)
+                      (alist-get (intern key) object nil nil #'equal)))))
+
+(defun magit-psr--json-each (object fn)
+  "Call FN on each entry of OBJECT.
+OBJECT may be a hash-table or an alist.
+FN is called with (key value)."
+  (pcase object
+    ((pred hash-table-p)
+     (maphash fn object))
+    ((pred consp)
+     (dolist (pair object)
+       (funcall fn (car pair) (cdr pair))))))
+
+(provide 'magit-psr)
+
+;;; magit-psr.el ends here
