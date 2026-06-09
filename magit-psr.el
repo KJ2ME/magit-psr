@@ -215,15 +215,14 @@ Shows cached items if available, or a loading indicator while scanning."
                                 for pos = (magit-psr--section-end section)
                                 when pos return pos)
                        (magit-psr--section-end 'bottom)))
-        (let ((section (magit-insert-section (psr)
+        (let ((section (magit-insert-section (psr nil t)
                          (magit-insert-heading
                           (format "%s (⏳)"
                                   (propertize magit-psr-section-heading
                                               'face 'magit-section-heading
                                               'font-lock-face 'magit-section-heading)))
                          (insert "\n"))))
-          (push section (oref magit-root-section children))
-          (magit-section-show section))))))
+          (push section (oref magit-root-section children)))))))
 
 (defun magit-psr--start-async-scan (buffer files)
   "Start async phpcs scan in BUFFER for FILES."
