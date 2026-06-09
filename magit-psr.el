@@ -167,7 +167,7 @@ t means explicit update requested, 'async means async scan in progress.")
                                  finally return (magit-current-section))))
       (object-remove-from-list magit-root-section 'children section)
       (with-slots (start end) section
-        (delete-region start (if (= end (point-max)) end (1+ end)))))))
+        (delete-region start end)))))
 
 (defun magit-psr--section-end (condition)
   "Return end position of section matching CONDITION."
