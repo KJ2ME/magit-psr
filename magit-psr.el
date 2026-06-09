@@ -95,7 +95,11 @@
   "When the items were last updated.")
 
 (defvar-local magit-psr-updating nil
-  "Whether items are being updated now.")
+  "Whether items are being updated now.
+t means explicit update requested, 'async means async scan in progress.")
+
+(defvar magit-psr--async-process nil
+  "Current async phpcs process, if any.")
 
 (defvar magit-psr-section-heading "PSR"
   "Allows overriding of section heading.")
@@ -129,6 +133,9 @@
   (interactive)
   (unless magit-psr-mode
     (user-error "Please activate `magit-psr-mode'"))
+  (when (and magit-psr--async-process
+             (process-live-p magit-psr--async-process))
+    (delete-process magit-psr--async-process))
   (let ((inhibit-read-only t))
     (magit-psr--delete-section [* psr])
     (setq magit-psr-updating t)
@@ -175,16 +182,90 @@
            (oref section end))))))
 
 (defun magit-psr--insert ()
-  "Insert PSR error items into current Magit status buffer."
+  "Insert PSR error items into current Magit status buffer.
+Starts an async phpcs scan on first run or explicit update.
+Shows cached items if available, or a loading indicator while scanning."
   (when (or magit-psr-updating
             (not (file-remote-p default-directory)))
-    (if (or (eq magit-psr-updating t)
-            (null magit-psr-last-update-time))
-        (progn
-          (setq magit-psr-updating t)
-          (let ((items (magit-psr--scan)))
-            (magit-psr--insert-items (current-buffer) items)))
-      (magit-psr--insert-items (current-buffer) magit-psr-item-cache))))
+    (if (and magit-psr-last-update-time
+             (not magit-psr-updating))
+        (magit-psr--insert-items (current-buffer) magit-psr-item-cache)
+      (if (eq magit-psr-updating 'async)
+          (magit-psr--insert-placeholder (current-buffer))
+        (setq magit-psr-updating 'async)
+        (magit-psr--insert-placeholder (current-buffer))
+        (let* ((default-directory (magit-toplevel))
+               (files (magit-psr--find-php-files default-directory)))
+          (if (not files)
+              (progn
+                (message "magit-psr: No PHP files found")
+                (magit-psr--delete-section [* psr])
+                (magit-psr--insert-items (current-buffer) nil)
+                (setq magit-psr-updating nil))
+            (magit-psr--start-async-scan (current-buffer) files)))))))
+
+(defun magit-psr--insert-placeholder (buffer)
+  "Insert loading placeholder section in BUFFER."
+  (with-current-buffer buffer
+    (let* ((magit-insert-section--parent magit-root-section)
+           (inhibit-read-only t))
+      (save-excursion
+        (goto-char (point-min))
+        (goto-char (or (cl-loop for section in magit-psr-insert-after
+                                for pos = (magit-psr--section-end section)
+                                when pos return pos)
+                       (magit-psr--section-end 'bottom)))
+        (let ((section (magit-insert-section (psr)
+                         (magit-insert-heading
+                          (format "%s (⏳)"
+                                  (propertize magit-psr-section-heading
+                                              'face 'magit-section-heading
+                                              'font-lock-face 'magit-section-heading)))
+                         (insert "\n"))))
+          (push section (oref magit-root-section children))
+          (magit-section-show section))))))
+
+(defun magit-psr--start-async-scan (buffer files)
+  "Start async phpcs scan in BUFFER for FILES."
+  (when (and magit-psr--async-process
+             (process-live-p magit-psr--async-process))
+    (delete-process magit-psr--async-process))
+  (let* ((args (append (list "--report=json"
+                              (format "--standard=%s" magit-psr-standard)
+                              "-s")
+                        magit-psr-phpcs-args
+                        files))
+         (process (make-process
+                   :name "magit-psr"
+                   :buffer (generate-new-buffer " *magit-psr-output*")
+                   :command (cons magit-psr-executable args)
+                   :noquery t
+                   :sentinel #'magit-psr--sentinel)))
+    (setq magit-psr--async-process process)
+    (process-put process 'magit-psr-buffer buffer)))
+
+(defun magit-psr--sentinel (process event)
+  "Sentinel for magit-psr async process.
+Parses phpcs output and updates the status buffer."
+  (when (or (string= event "finished\n")
+            (string-prefix-p "exited " event))
+    (let* ((output-buffer (process-buffer process))
+           (target-buffer (process-get process 'magit-psr-buffer))
+           (output (with-current-buffer output-buffer
+                     (buffer-string)))
+           (items (condition-case nil
+                      (magit-psr--parse-phpcs-output output)
+                    (error
+                     (message "magit-psr: Failed to parse phpcs output")
+                     nil))))
+      (when (buffer-live-p target-buffer)
+        (with-current-buffer target-buffer
+          (let ((inhibit-read-only t))
+            (magit-psr--delete-section [* psr])
+            (magit-psr--insert-items target-buffer items))))))
+  (when (and (process-buffer process)
+             (buffer-live-p (process-buffer process)))
+    (kill-buffer (process-buffer process))))
 
 (cl-defun magit-psr--insert-items (buffer items)
   "Insert PSR ITEMS into BUFFER."
@@ -287,8 +368,36 @@ Respects `magit-psr-exclude-globs' and `magit-psr-depth'."
                0)
         (split-string (buffer-string) "\n" t)))))
 
+(defun magit-psr--parse-phpcs-output (output)
+  "Parse phpcs JSON OUTPUT into list of `magit-psr-item' structs."
+  (let* ((default-directory (magit-toplevel))
+         (json-data (condition-case nil
+                        (magit-psr--json-read output)
+                      (error nil)))
+         (items nil))
+    (when json-data
+      (let* ((files-table (magit-psr--json-get json-data "files")))
+        (when files-table
+          (magit-psr--json-each
+           files-table
+           (lambda (filename file-data)
+             (let ((messages (magit-psr--json-get file-data "messages")))
+               (dolist (msg messages)
+                 (let ((type (magit-psr--json-get msg "type")))
+                   (when (or magit-psr-show-warnings (string= type "ERROR"))
+                     (let* ((relative (file-relative-name filename default-directory))
+                            (item (make-magit-psr-item
+                                   :filename relative
+                                   :line (magit-psr--json-get msg "line")
+                                   :column (magit-psr--json-get msg "column")
+                                   :message (magit-psr--json-get msg "message")
+                                   :source (magit-psr--json-get msg "source")
+                                   :type type)))
+                       (push item items))))))))))
+    (nreverse items))))
+
 (defun magit-psr--scan ()
-  "Run phpcs and return list of `magit-psr-item' structs."
+  "Run phpcs synchronously and return list of `magit-psr-item' structs."
   (let* ((default-directory (magit-toplevel))
          (files (magit-psr--find-php-files default-directory)))
     (if (not files)
@@ -302,33 +411,8 @@ Respects `magit-psr-exclude-globs' and `magit-psr-depth'."
                            magit-psr-phpcs-args
                            files))
              (command (mapconcat #'shell-quote-argument args " "))
-             (output (shell-command-to-string command))
-             (json-data (condition-case nil
-                            (magit-psr--json-read output)
-                          (error
-                           (message "magit-psr: Failed to parse phpcs output")
-                           nil)))
-             (items nil))
-        (when json-data
-          (let* ((files-table (magit-psr--json-get json-data "files")))
-            (when files-table
-              (magit-psr--json-each
-               files-table
-               (lambda (filename file-data)
-                 (let ((messages (magit-psr--json-get file-data "messages")))
-                   (dolist (msg messages)
-                     (let ((type (magit-psr--json-get msg "type")))
-                       (when (or magit-psr-show-warnings (string= type "ERROR"))
-                         (let* ((relative (file-relative-name filename default-directory))
-                                (item (make-magit-psr-item
-                                       :filename relative
-                                       :line (magit-psr--json-get msg "line")
-                                       :column (magit-psr--json-get msg "column")
-                                       :message (magit-psr--json-get msg "message")
-                                       :source (magit-psr--json-get msg "source")
-                                       :type type)))
-                           (push item items))))))))))
-        (nreverse items))))))
+             (output (shell-command-to-string command)))
+         (magit-psr--parse-phpcs-output output)))))
 
 ;;;;; JSON parsing helpers
 
