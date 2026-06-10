@@ -453,7 +453,8 @@
   (should (equal magit-psr-exclude-globs '("vendor/" "node_modules/")))
   (should (equal magit-psr-depth nil))
   (should (equal magit-psr-phpcs-args nil))
-  (should (equal magit-psr-recent-commits nil)))
+  (should (equal magit-psr-recent-commits nil))
+  (should (equal magit-psr-show-placeholder t)))
 
 ;;; Integration tests (use real git on this repo)
 

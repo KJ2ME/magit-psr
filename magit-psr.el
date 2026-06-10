@@ -89,6 +89,12 @@ When N>0, also includes files changed in the last N commits."
   :type '(choice (const :tag "All files" nil)
                  (integer :tag "N recent commits")))
 
+(defcustom magit-psr-show-placeholder t
+  "Whether to show a loading placeholder while the async scan runs.
+When non-nil, the PSR section shows a hourglass indicator during scanning.
+When nil, the section only appears once results are available."
+  :type 'boolean)
+
 ;;;; Structs
 
 (cl-defstruct magit-psr-item
@@ -207,9 +213,11 @@ Shows cached items if available, or a loading indicator while scanning."
              (not magit-psr-updating))
         (magit-psr--insert-items (current-buffer) magit-psr-item-cache)
       (if (eq magit-psr-updating 'async)
-          (magit-psr--insert-placeholder (current-buffer))
+          (when magit-psr-show-placeholder
+            (magit-psr--insert-placeholder (current-buffer)))
         (setq magit-psr-updating 'async)
-        (magit-psr--insert-placeholder (current-buffer))
+        (when magit-psr-show-placeholder
+          (magit-psr--insert-placeholder (current-buffer)))
         (let* ((default-directory (magit-toplevel))
                (files (magit-psr--find-php-files default-directory)))
           (if (not files)
