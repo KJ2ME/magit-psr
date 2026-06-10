@@ -121,6 +121,11 @@ t means explicit update requested, 'async means async scan in progress.")
 
 ;;;; Mode
 
+(defun magit-psr--invalidate-cache ()
+  "Invalidate PSR cache before Magit refreshes, forcing a new scan."
+  (when (derived-mode-p 'magit-status-mode)
+    (setq magit-psr-last-update-time nil)))
+
 ;;;###autoload
 (define-minor-mode magit-psr-mode
   "Show PHP PSR errors in Magit status buffer for PHP files in repo."
@@ -128,11 +133,14 @@ t means explicit update requested, 'async means async scan in progress.")
   :group 'magit-psr
   :global t
   (if magit-psr-mode
-      (magit-add-section-hook 'magit-status-sections-hook
-                              #'magit-psr--insert
-                              nil
-                              'append)
-    (remove-hook 'magit-status-sections-hook #'magit-psr--insert)))
+      (progn
+        (magit-add-section-hook 'magit-status-sections-hook
+                                #'magit-psr--insert
+                                nil
+                                'append)
+        (add-hook 'magit-pre-refresh-hook #'magit-psr--invalidate-cache))
+    (remove-hook 'magit-status-sections-hook #'magit-psr--insert)
+    (remove-hook 'magit-pre-refresh-hook #'magit-psr--invalidate-cache)))
 
 ;;;; Commands
 
