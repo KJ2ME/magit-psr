@@ -354,6 +354,86 @@
              (lambda (&rest _) "not valid json")))
     (should (equal (magit-psr--scan) nil))))
 
+;;; changed-files (mocked git)
+
+(ert-deftest magit-psr-git-changed-files-uncommitted ()
+  "Test `magit-psr--git-changed-files' with uncommitted changes."
+  (cl-letf (((symbol-function 'call-process)
+             (lambda (program &optional infile destination display &rest args)
+               (when (and (string= program "git") (eq destination t))
+                 (cond
+                  ((equal args '("diff" "--name-only" "HEAD"))
+                   (insert "src/new.php\nlib/old.php\n") 0)
+                  ((equal args '("ls-files" "--others" "--exclude-standard"))
+                   (insert "vendor/test.php\n") 0)
+                  ((equal args '("log" "--name-only" "--pretty=format:" "-5" "--diff-filter=AMR"))
+                   0)
+                  (t 0))))))
+    (let ((magit-psr-recent-commits 5))
+      (should (equal (sort (magit-psr--git-changed-files "/repo/") #'string<)
+                     '("lib/old.php" "src/new.php" "vendor/test.php"))))))
+
+(ert-deftest magit-psr-git-changed-files-with-recent-commits ()
+  "Test `magit-psr--git-changed-files' includes recent commits."
+  (cl-letf (((symbol-function 'call-process)
+             (lambda (program &optional infile destination display &rest args)
+               (when (and (string= program "git") (eq destination t))
+                 (cond
+                  ((equal args '("diff" "--name-only" "HEAD"))
+                   0)
+                  ((equal args '("ls-files" "--others" "--exclude-standard"))
+                   0)
+                  ((equal args '("log" "--name-only" "--pretty=format:" "-5" "--diff-filter=AMR"))
+                   (insert "src/old.php\nsrc/new.php\n") 0)
+                  (t 0))))))
+    (let ((magit-psr-recent-commits 5))
+      (should (equal (sort (magit-psr--git-changed-files "/repo/") #'string<)
+                     '("src/new.php" "src/old.php"))))))
+
+(ert-deftest magit-psr-git-changed-files-empty ()
+  "Test `magit-psr--git-changed-files' when nothing changed."
+  (cl-letf (((symbol-function 'call-process)
+             (lambda (program &optional infile destination display &rest args)
+               (when (and (string= program "git") (eq destination t))
+                 0))))
+    (let ((magit-psr-recent-commits 5))
+      (should (equal (magit-psr--git-changed-files "/repo/") nil)))))
+
+(ert-deftest magit-psr-git-changed-files-zero-commits ()
+  "Test `magit-psr--git-changed-files' with recent-commits=0 (no recent)."
+  (cl-letf (((symbol-function 'call-process)
+             (lambda (program &optional infile destination display &rest args)
+               (when (and (string= program "git") (eq destination t))
+                 (cond
+                  ((equal args '("diff" "--name-only" "HEAD"))
+                   (insert "src/new.php\n") 0)
+                  ((equal args '("ls-files" "--others" "--exclude-standard"))
+                   0)
+                  ((equal args '("log" "--name-only" "--pretty=format:" "-0" "--diff-filter=AMR"))
+                   0)
+                  (t 0))))))
+    (let ((magit-psr-recent-commits 0))
+      (should (equal (magit-psr--git-changed-files "/repo/")
+                     '("src/new.php"))))))
+
+(ert-deftest magit-psr-find-php-files-changed ()
+  "Test `magit-psr--find-php-files' with recent-commits enabled."
+  (cl-letf (((symbol-function 'call-process)
+             (lambda (program &optional infile destination display &rest args)
+               (when (and (string= program "git") (eq destination t))
+                 (cond
+                  ((equal args '("diff" "--name-only" "HEAD"))
+                   0)
+                  ((equal args '("ls-files" "--others" "--exclude-standard"))
+                   0)
+                  ((equal args '("log" "--name-only" "--pretty=format:" "-3" "--diff-filter=AMR"))
+                   (insert "src/App.php\nlib/Util.php\nvendor/pkg/Lib.php\n") 0)
+                  (t 0))))))
+    (let ((magit-psr-recent-commits 3)
+          (magit-psr-exclude-globs '("vendor/*")))
+      (should (equal (sort (magit-psr--find-php-files "/repo/") #'string<)
+                     '("lib/Util.php" "src/App.php"))))))
+
 ;;; Section helpers (no buffer required)
 
 (ert-deftest magit-psr-delete-section-no-section ()
@@ -372,7 +452,8 @@
   (should (equal magit-psr-show-warnings nil))
   (should (equal magit-psr-exclude-globs '("vendor/" "node_modules/")))
   (should (equal magit-psr-depth nil))
-  (should (equal magit-psr-phpcs-args nil)))
+  (should (equal magit-psr-phpcs-args nil))
+  (should (equal magit-psr-recent-commits nil)))
 
 ;;; Integration tests (use real git on this repo)
 

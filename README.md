@@ -28,16 +28,17 @@ To refresh manually: `M-x magit-psr-update`.
 M-x customize-group magit-psr
 ```
 
-| Variable                  | Default                       | Description                                    |
-|---------------------------|-------------------------------|------------------------------------------------|
-| `magit-psr-executable`    | `"phpcs"`                     | Path to the phpcs executable                   |
-| `magit-psr-standard`      | `"PSR12"`                     | Coding standard (PSR1, PSR2, PSR12, etc.)      |
-| `magit-psr-show-warnings` | `nil`                         | Show warnings in addition to errors            |
-| `magit-psr-exclude-globs` | `("vendor/" "node_modules/")` | Glob patterns to exclude                       |
-| `magit-psr-max-items`     | `20`                          | Collapse section when exceeding N items        |
-| `magit-psr-depth`         | `nil`                         | Maximum subdirectory depth (`nil` = unlimited) |
-| `magit-psr-phpcs-args`    | `nil`                         | Extra arguments for phpcs                      |
-| `magit-psr-insert-after`  | `(bottom)`                    | Where to insert the section in the buffer      |
+| Variable                   | Default                       | Description                                                                                |
+|----------------------------|-------------------------------|--------------------------------------------------------------------------------------------|
+| `magit-psr-executable`     | `"phpcs"`                     | Path to the phpcs executable                                                               |
+| `magit-psr-standard`       | `"PSR12"`                     | Coding standard (PSR1, PSR2, PSR12, etc.)                                                  |
+| `magit-psr-show-warnings`  | `nil`                         | Show warnings in addition to errors                                                        |
+| `magit-psr-exclude-globs`  | `("vendor/" "node_modules/")` | Glob patterns to exclude                                                                   |
+| `magit-psr-max-items`      | `20`                          | Collapse section when exceeding N items                                                    |
+| `magit-psr-depth`          | `nil`                         | Maximum subdirectory depth (`nil` = unlimited)                                             |
+| `magit-psr-phpcs-args`     | `nil`                         | Extra arguments for phpcs                                                                  |
+| `magit-psr-insert-after`   | `(bottom)`                    | Where to insert the section in the buffer                                                  |
+| `magit-psr-recent-commits` | `nil`                         | Limit scanning to changed files in N recent commits (`nil` = all files, `0` = uncommitted) |
 
 ## License
 

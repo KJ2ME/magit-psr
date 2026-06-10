@@ -81,6 +81,14 @@
   "Additional arguments to pass to phpcs."
   :type '(repeat string))
 
+(defcustom magit-psr-recent-commits nil
+  "Number of recent commits to include when checking for changed files.
+When nil, scan all tracked files (default, legacy behavior).
+When 0, only scan files with uncommitted changes (staged, unstaged, untracked).
+When N>0, also includes files changed in the last N commits."
+  :type '(choice (const :tag "All files" nil)
+                 (integer :tag "N recent commits")))
+
 ;;;; Structs
 
 (cl-defstruct magit-psr-item
@@ -338,11 +346,43 @@ Parses phpcs output and updates the status buffer."
 
 ;;;; Scanning
 
+(defun magit-psr--git-changed-files (&optional directory)
+  "Return list of files with changes in DIRECTORY.
+Includes staged, unstaged, and untracked files.
+When `magit-psr-recent-commits' is a positive integer, also
+includes files changed in that many recent commits."
+  (let* ((default-directory (or directory default-directory))
+         (git (if (boundp 'magit-git-executable) magit-git-executable "git"))
+         (files (list)))
+    ;; Uncommitted changes: staged + unstaged
+    (with-temp-buffer
+      (when (= (call-process git nil t nil "diff" "--name-only" "HEAD") 0)
+        (dolist (f (split-string (buffer-string) "\n" t))
+          (push f files))))
+    ;; Untracked files
+    (with-temp-buffer
+      (when (= (call-process git nil t nil "ls-files" "--others" "--exclude-standard") 0)
+        (dolist (f (split-string (buffer-string) "\n" t))
+          (push f files))))
+    ;; Recent commits
+    (when (and magit-psr-recent-commits
+               (>= magit-psr-recent-commits 1))
+      (with-temp-buffer
+        (when (= (call-process git nil t nil "log" "--name-only" "--pretty=format:"
+                                (format "-%d" magit-psr-recent-commits)
+                                "--diff-filter=AMR") 0)
+          (dolist (f (split-string (buffer-string) "\n" t))
+            (push f files)))))
+    (delete-dups files)))
+
 (defun magit-psr--find-php-files (directory)
-  "Find PHP files in DIRECTORY using git ls-files.
-Respects `magit-psr-exclude-globs' and `magit-psr-depth'."
+  "Find PHP files in DIRECTORY using git.
+Respects `magit-psr-exclude-globs' and `magit-psr-depth'.
+When `magit-psr-recent-commits' is non-nil, only returns changed files."
   (let* ((default-directory directory)
-         (all-files (magit-psr--git-ls-files))
+         (all-files (if magit-psr-recent-commits
+                        (magit-psr--git-changed-files directory)
+                      (magit-psr--git-ls-files)))
          (php-files (seq-filter (lambda (f) (string-suffix-p ".php" f t)) all-files))
          (glob-regexps (mapcar (lambda (glob)
                                 (wildcard-to-regexp
