@@ -81,6 +81,16 @@
   "Additional arguments to pass to phpcs."
   :type '(repeat string))
 
+(defcustom magit-psr-project-config-file nil
+  "PHPCS project configuration file to use.
+When nil, auto-detect phpcs.xml.dist, phpcs.xml, phpcs.ruleset.xml,
+or ruleset.xml in the project root.
+When set to a string, use that path relative to the project root
+\(e.g., \"backend/phpcs.xml\").
+If the file is not found, falls back to `magit-psr-standard'."
+  :type '(choice (const :tag "Auto-detect" nil)
+                 (string :tag "Relative path")))
+
 (defcustom magit-psr-recent-commits nil
   "Number of recent commits to include when checking for changed files.
 When nil, scan all tracked files (default, legacy behavior).
@@ -253,11 +263,15 @@ Shows cached items if available, or a loading indicator while scanning."
   (when (and magit-psr--async-process
              (process-live-p magit-psr--async-process))
     (delete-process magit-psr--async-process))
-  (let* ((args (append (list "--report=json"
-                              (format "--standard=%s" magit-psr-standard)
-                              "-s")
-                        magit-psr-phpcs-args
-                        files))
+  (let* ((config-file (magit-psr--find-config-file))
+         (standard-arg (if config-file
+                           (format "--standard=%s" config-file)
+                         (format "--standard=%s" magit-psr-standard)))
+         (args (append (list "--report=json"
+                               standard-arg
+                               "-s")
+                         magit-psr-phpcs-args
+                         files))
          (process (make-process
                    :name "magit-psr"
                    :buffer (generate-new-buffer " *magit-psr-output*")
@@ -423,6 +437,24 @@ When `magit-psr-recent-commits' is non-nil, only returns changed files."
                0)
         (split-string (buffer-string) "\n" t)))))
 
+(defun magit-psr--find-config-file ()
+  "Find project PHPCS configuration file.
+Returns the full path, or nil if not found.
+When `magit-psr-project-config-file' is nil, auto-detects
+phpcs.xml.dist, phpcs.xml, phpcs.ruleset.xml, or ruleset.xml
+in the project root.
+When set to a string, looks for that path relative to project root."
+  (let ((toplevel (magit-toplevel))
+        (candidates (if magit-psr-project-config-file
+                        (list magit-psr-project-config-file)
+                      '("phpcs.xml.dist" "phpcs.xml"
+                        "phpcs.ruleset.xml" "ruleset.xml"))))
+    (cl-some (lambda (f)
+               (let ((full-path (expand-file-name f toplevel)))
+                 (when (file-exists-p full-path)
+                   full-path)))
+             candidates)))
+
 (defun magit-psr--parse-phpcs-output (output)
   "Parse phpcs JSON OUTPUT into list of `magit-psr-item' structs."
   (let* ((default-directory (magit-toplevel))
@@ -459,9 +491,13 @@ When `magit-psr-recent-commits' is non-nil, only returns changed files."
         (progn
           (message "magit-psr: No PHP files found")
           nil)
-      (let* ((args (append (list magit-psr-executable
+      (let* ((config-file (magit-psr--find-config-file))
+             (standard-arg (if config-file
+                               (format "--standard=%s" config-file)
+                             (format "--standard=%s" magit-psr-standard)))
+             (args (append (list magit-psr-executable
                                  "--report=json"
-                                 (format "--standard=%s" magit-psr-standard)
+                                 standard-arg
                                  "-s")
                            magit-psr-phpcs-args
                            files))

@@ -454,7 +454,52 @@
   (should (equal magit-psr-depth nil))
   (should (equal magit-psr-phpcs-args nil))
   (should (equal magit-psr-recent-commits nil))
-  (should (equal magit-psr-show-placeholder t)))
+  (should (equal magit-psr-show-placeholder t))
+  (should (equal magit-psr-project-config-file nil)))
+
+;;; find-config-file
+
+(ert-deftest magit-psr-find-config-file-not-found ()
+  "Test `magit-psr--find-config-file' when no config file exists."
+  (cl-letf (((symbol-function 'magit-toplevel) (lambda () "/tmp/nonexistent-")))
+    (should (equal (magit-psr--find-config-file) nil))))
+
+(ert-deftest magit-psr-find-config-file-auto-detect ()
+  "Test `magit-psr--find-config-file' auto-detects known filenames."
+  (cl-letf (((symbol-function 'magit-toplevel) (lambda () "/tmp/magit-psr-test-dir"))
+            ((symbol-function 'file-exists-p)
+             (lambda (f) (string-suffix-p "phpcs.xml.dist" f))))
+    (let ((magit-psr-project-config-file nil))
+      (should (magit-psr--find-config-file))
+      (should (string-suffix-p
+               "phpcs.xml.dist" (magit-psr--find-config-file))))))
+
+(ert-deftest magit-psr-find-config-file-auto-detect-order ()
+  "Test auto-detect order prefers phpcs.xml.dist over phpcs.xml."
+  (cl-letf (((symbol-function 'magit-toplevel) (lambda () "/tmp/magit-psr-test-dir"))
+            ((symbol-function 'file-exists-p)
+             (lambda (f) (or (string-suffix-p "phpcs.xml.dist" f)
+                              (string-suffix-p "phpcs.xml" f)))))
+    (let ((magit-psr-project-config-file nil))
+      (should (string-suffix-p
+               "phpcs.xml.dist" (magit-psr--find-config-file))))))
+
+(ert-deftest magit-psr-find-config-file-custom-path ()
+  "Test `magit-psr--find-config-file' with custom path."
+  (cl-letf (((symbol-function 'magit-toplevel) (lambda () "/tmp/magit-psr-test-dir"))
+            ((symbol-function 'file-exists-p)
+             (lambda (f) (string-suffix-p "backend/phpcs.xml" f))))
+    (let ((magit-psr-project-config-file "backend/phpcs.xml"))
+      (should (magit-psr--find-config-file))
+      (should (string-suffix-p
+               "backend/phpcs.xml" (magit-psr--find-config-file))))))
+
+(ert-deftest magit-psr-find-config-file-custom-path-not-found ()
+  "Test `magit-psr--find-config-file' falls back to nil when custom path missing."
+  (cl-letf (((symbol-function 'magit-toplevel) (lambda () "/tmp/magit-psr-test-dir"))
+            ((symbol-function 'file-exists-p) (lambda (_) nil)))
+    (let ((magit-psr-project-config-file "backend/phpcs.xml"))
+      (should (equal (magit-psr--find-config-file) nil)))))
 
 ;;; Integration tests (use real git on this repo)
 
