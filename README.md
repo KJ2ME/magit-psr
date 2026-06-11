@@ -38,6 +38,7 @@ M-x customize-group magit-psr
 | `magit-psr-depth`               | `nil`                         | Maximum subdirectory depth (`nil` = unlimited)                                                                                         |
 | `magit-psr-phpcs-args`          | `nil`                         | Extra arguments for phpcs                                                                                                              |
 | `magit-psr-project-config-file` | `nil`                         | Project config file: `nil` auto-detects phpcs.xml.dist/phpcs.xml/ruleset.xml; string sets relative path (e.g. `\"backend/phpcs.xml\"`) |
+| `magit-psr-custom-rules`        | `nil`                         | Override phpcs sniff properties inline. See `magit-psr.el` for format                                                                  |
 | `magit-psr-insert-after`        | `(bottom)`                    | Where to insert the section in the buffer                                                                                              |
 | `magit-psr-recent-commits`      | `nil`                         | Limit scanning to changed files in N recent commits (`nil` = all files, `0` = uncommitted)                                             |
 | `magit-psr-show-placeholder`    | `t`                           | Show hourglass indicator while scanning (`nil` = section appears only when done)                                                       |

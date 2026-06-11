@@ -455,7 +455,8 @@
   (should (equal magit-psr-phpcs-args nil))
   (should (equal magit-psr-recent-commits nil))
   (should (equal magit-psr-show-placeholder t))
-  (should (equal magit-psr-project-config-file nil)))
+  (should (equal magit-psr-project-config-file nil))
+  (should (equal magit-psr-custom-rules nil)))
 
 ;;; find-config-file
 
@@ -500,6 +501,144 @@
             ((symbol-function 'file-exists-p) (lambda (_) nil)))
     (let ((magit-psr-project-config-file "backend/phpcs.xml"))
       (should (equal (magit-psr--find-config-file) nil)))))
+
+;;; temp-ruleset
+
+(ert-deftest magit-psr-create-temp-ruleset-creates-file ()
+  "Test `magit-psr--create-temp-ruleset' creates a temp XML file."
+  (let ((magit-psr-custom-rules nil)
+        (magit-psr-standard "PSR12"))
+    (let ((temp-file (magit-psr--create-temp-ruleset nil)))
+      (unwind-protect
+          (progn
+            (should (file-exists-p temp-file))
+            (should (string-suffix-p ".xml" temp-file)))
+        (delete-file temp-file)))))
+
+(ert-deftest magit-psr-create-temp-ruleset-no-custom ()
+  "Test temp ruleset with no custom rules (just base standard)."
+  (let ((magit-psr-custom-rules nil)
+        (magit-psr-standard "PSR12"))
+    (let ((temp-file (magit-psr--create-temp-ruleset nil)))
+      (unwind-protect
+          (with-temp-buffer
+            (insert-file-contents temp-file)
+            (goto-char (point-min))
+            (should (search-forward "ref=\"PSR12\"" nil t))
+            (should (search-forward "</ruleset>" nil t)))
+        (delete-file temp-file)))))
+
+(ert-deftest magit-psr-create-temp-ruleset-with-custom ()
+  "Test temp ruleset with custom rule override."
+  (let ((magit-psr-custom-rules
+         '((:rule "Generic.Files.LineLength"
+            :properties (("lineLimit" . "140")
+                         ("absoluteLineLimit" . "140")))))
+        (magit-psr-standard "PSR12"))
+    (let ((temp-file (magit-psr--create-temp-ruleset nil)))
+      (unwind-protect
+          (with-temp-buffer
+            (insert-file-contents temp-file)
+            (goto-char (point-min))
+            (should (search-forward "ref=\"PSR12\"" nil t))
+            (should (search-forward "ref=\"Generic.Files.LineLength\"" nil t))
+            (should (search-forward "name=\"lineLimit\" value=\"140\"" nil t))
+            (should (search-forward "name=\"absoluteLineLimit\" value=\"140\"" nil t))
+            (should (search-forward "</ruleset>" nil t)))
+        (delete-file temp-file)))))
+
+(ert-deftest magit-psr-create-temp-ruleset-with-config-file ()
+  "Test temp ruleset references config file path as base."
+  (let ((magit-psr-custom-rules
+         '((:rule "Generic.Files.LineLength"
+            :properties (("lineLimit" . "140")))))
+        (magit-psr-standard "PSR12"))
+    (let ((temp-file (magit-psr--create-temp-ruleset "/repo/backend/phpcs.xml")))
+      (unwind-protect
+          (with-temp-buffer
+            (insert-file-contents temp-file)
+            (goto-char (point-min))
+            (should (search-forward "ref=\"/repo/backend/phpcs.xml\"" nil t))
+            (should (search-forward "ref=\"Generic.Files.LineLength\"" nil t))
+            (should (search-forward "</ruleset>" nil t)))
+        (delete-file temp-file)))))
+
+(ert-deftest magit-psr-create-temp-ruleset-custom-no-properties ()
+  "Test temp ruleset with a custom rule that has no properties."
+  (let ((magit-psr-custom-rules '((:rule "PSR1.Classes.ClassDeclaration")))
+        (magit-psr-standard "PSR12"))
+    (let ((temp-file (magit-psr--create-temp-ruleset nil)))
+      (unwind-protect
+          (with-temp-buffer
+            (insert-file-contents temp-file)
+            (goto-char (point-min))
+            (should (search-forward "ref=\"PSR1.Classes.ClassDeclaration\"" nil t))
+            ;; Should NOT have a <properties> block
+            (should-not (search-forward "<properties>" nil t)))
+        (delete-file temp-file)))))
+
+(ert-deftest magit-psr-create-temp-ruleset-exclude-pattern ()
+  "Test temp ruleset with exclude-pattern."
+  (let ((magit-psr-custom-rules
+         '((:rule "Generic.Files.LineLength"
+            :exclude-pattern "/routes")))
+        (magit-psr-standard "PSR12"))
+    (let ((temp-file (magit-psr--create-temp-ruleset nil)))
+      (unwind-protect
+          (with-temp-buffer
+            (insert-file-contents temp-file)
+            (goto-char (point-min))
+            (should (search-forward "ref=\"Generic.Files.LineLength\"" nil t))
+            (should (search-forward "<exclude-pattern>/routes</exclude-pattern>" nil t))
+            (should (search-forward "</ruleset>" nil t)))
+        (delete-file temp-file)))))
+
+(ert-deftest magit-psr-create-temp-ruleset-exclude-pattern-list ()
+  "Test temp ruleset with multiple exclude-patterns."
+  (let ((magit-psr-custom-rules
+         (list (list :rule "Generic.Files.LineLength"
+                     :exclude-pattern (list "/tests" "/migrations"))))
+        (magit-psr-standard "PSR12"))
+    (let ((temp-file (magit-psr--create-temp-ruleset nil)))
+      (unwind-protect
+          (with-temp-buffer
+            (insert-file-contents temp-file)
+            (goto-char (point-min))
+            (should (search-forward "<exclude-pattern>/tests</exclude-pattern>" nil t))
+            (should (search-forward "<exclude-pattern>/migrations</exclude-pattern>" nil t)))
+        (delete-file temp-file)))))
+
+(ert-deftest magit-psr-create-temp-ruleset-include-pattern ()
+  "Test temp ruleset with include-pattern."
+  (let ((magit-psr-custom-rules
+         '((:rule "Generic.Files.LineLength"
+            :include-pattern "*.php")))
+        (magit-psr-standard "PSR12"))
+    (let ((temp-file (magit-psr--create-temp-ruleset nil)))
+      (unwind-protect
+          (with-temp-buffer
+            (insert-file-contents temp-file)
+            (goto-char (point-min))
+            (should (search-forward "<include-pattern>*.php</include-pattern>" nil t)))
+        (delete-file temp-file)))))
+
+(ert-deftest magit-psr-create-temp-ruleset-exclude-and-properties ()
+  "Test temp ruleset with exclude-pattern and properties combined."
+  (let ((magit-psr-custom-rules
+         '((:rule "Generic.Files.LineLength"
+            :properties (("lineLimit" . "140"))
+            :exclude-pattern "/routes")))
+        (magit-psr-standard "PSR12"))
+    (let ((temp-file (magit-psr--create-temp-ruleset nil)))
+      (unwind-protect
+          (with-temp-buffer
+            (insert-file-contents temp-file)
+            (goto-char (point-min))
+            (should (search-forward "ref=\"Generic.Files.LineLength\"" nil t))
+            (should (search-forward "name=\"lineLimit\" value=\"140\"" nil t))
+            (should (search-forward "<exclude-pattern>/routes</exclude-pattern>" nil t))
+            (should (search-forward "</rule>" nil t)))
+        (delete-file temp-file)))))
 
 ;;; Integration tests (use real git on this repo)
 

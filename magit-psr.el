@@ -91,6 +91,33 @@ If the file is not found, falls back to `magit-psr-standard'."
   :type '(choice (const :tag "Auto-detect" nil)
                  (string :tag "Relative path")))
 
+(defcustom magit-psr-custom-rules nil
+  "Custom phpcs rule overrides.
+Each element is a plist:
+  :rule            - string, the sniff code (e.g. \"Generic.Files.LineLength\")
+  :properties      - alist of (property-name . value) overrides
+  :exclude-pattern - string or list of strings, file patterns to exclude
+  :include-pattern - string or list of strings, file patterns to include
+
+Example:
+  '((:rule \"Generic.Files.LineLength\"
+     :properties ((\"lineLimit\" . \"140\"))
+     :exclude-pattern \"/routes\")
+    (:rule \"PSR1.Classes.ClassDeclaration\"
+     :exclude-pattern '(\"/tests\" \"/migrations\")))"
+  :type '(repeat (plist :options (((const :rule) (string :tag \"Sniff code\"))
+                                  ((const :properties)
+                                   (alist :key-type (string :tag \"Property name\")
+                                          :value-type (string :tag \"Value\")))
+                                  ((const :exclude-pattern)
+                                   (choice :tag \"Exclude pattern\"
+                                    (string :tag \"Single pattern\")
+                                    (repeat :tag \"Multiple patterns\" (string :tag \"Pattern\"))))
+                                  ((const :include-pattern)
+                                   (choice :tag \"Include pattern\"
+                                    (string :tag \"Single pattern\")
+                                    (repeat :tag \"Multiple patterns\" (string :tag \"Pattern\"))))))))
+
 (defcustom magit-psr-recent-commits nil
   "Number of recent commits to include when checking for changed files.
 When nil, scan all tracked files (default, legacy behavior).
@@ -262,16 +289,22 @@ Shows cached items if available, or a loading indicator while scanning."
   "Start async phpcs scan in BUFFER for FILES."
   (when (and magit-psr--async-process
              (process-live-p magit-psr--async-process))
+    (magit-psr--cleanup-temp-ruleset magit-psr--async-process)
     (delete-process magit-psr--async-process))
   (let* ((config-file (magit-psr--find-config-file))
-         (standard-arg (if config-file
-                           (format "--standard=%s" config-file)
-                         (format "--standard=%s" magit-psr-standard)))
+         (temp-ruleset (when magit-psr-custom-rules
+                         (magit-psr--create-temp-ruleset config-file)))
+         (standard-arg (cond (temp-ruleset
+                              (format "--standard=%s" temp-ruleset))
+                             (config-file
+                              (format "--standard=%s" config-file))
+                             (t
+                              (format "--standard=%s" magit-psr-standard))))
          (args (append (list "--report=json"
-                               standard-arg
-                               "-s")
-                         magit-psr-phpcs-args
-                         files))
+                                standard-arg
+                                "-s")
+                          magit-psr-phpcs-args
+                          files))
          (process (make-process
                    :name "magit-psr"
                    :buffer (generate-new-buffer " *magit-psr-output*")
@@ -279,7 +312,9 @@ Shows cached items if available, or a loading indicator while scanning."
                    :noquery t
                    :sentinel #'magit-psr--sentinel)))
     (setq magit-psr--async-process process)
-    (process-put process 'magit-psr-buffer buffer)))
+    (process-put process 'magit-psr-buffer buffer)
+    (when temp-ruleset
+      (process-put process 'magit-psr-temp-ruleset temp-ruleset))))
 
 (defun magit-psr--sentinel (process event)
   "Sentinel for magit-psr async process.
@@ -302,7 +337,8 @@ Parses phpcs output and updates the status buffer."
             (magit-psr--insert-items target-buffer items))))))
   (when (and (process-buffer process)
              (buffer-live-p (process-buffer process)))
-    (kill-buffer (process-buffer process))))
+    (kill-buffer (process-buffer process)))
+  (magit-psr--cleanup-temp-ruleset process))
 
 (cl-defun magit-psr--insert-items (buffer items)
   "Insert PSR ITEMS into BUFFER."
@@ -455,6 +491,47 @@ When set to a string, looks for that path relative to project root."
                    full-path)))
              candidates)))
 
+(defun magit-psr--create-temp-ruleset (&optional config-file)
+  "Create a temporary PHPCS ruleset XML file.
+When CONFIG-FILE is non-nil, it is used as the base standard reference;
+otherwise falls back to `magit-psr-standard'.
+Custom rules from `magit-psr-custom-rules' are appended as overrides.
+Returns the temp file path."
+  (let* ((base (or config-file magit-psr-standard))
+         (temp-file (make-temp-file "magit-psr-ruleset-" nil ".xml")))
+    (with-temp-file temp-file
+      (insert "<?xml version=\"1.0\"?>\n")
+      (insert "<ruleset name=\"magit-psr-custom\">\n")
+      (insert (format "  <rule ref=\"%s\"/>\n" base))
+      (dolist (rule magit-psr-custom-rules)
+        (let* ((rule-code (plist-get rule :rule))
+               (properties (plist-get rule :properties))
+               (exclude (plist-get rule :exclude-pattern))
+               (include (plist-get rule :include-pattern))
+               (has-children (or properties exclude include)))
+          (if (not has-children)
+              (insert (format "  <rule ref=\"%s\"/>\n" rule-code))
+            (insert (format "  <rule ref=\"%s\">\n" rule-code))
+            (when properties
+              (insert "    <properties>\n")
+              (dolist (prop properties)
+                (insert (format "      <property name=\"%s\" value=\"%s\"/>\n"
+                                (car prop) (cdr prop))))
+              (insert "    </properties>\n"))
+            (dolist (pattern (if (listp exclude) exclude (list exclude)))
+              (insert (format "    <exclude-pattern>%s</exclude-pattern>\n" pattern)))
+            (dolist (pattern (if (listp include) include (list include)))
+              (insert (format "    <include-pattern>%s</include-pattern>\n" pattern)))
+            (insert "  </rule>\n"))))
+      (insert "</ruleset>\n"))
+    temp-file))
+
+(defun magit-psr--cleanup-temp-ruleset (process)
+  "Delete temp ruleset file associated with PROCESS, if any."
+  (let ((temp-file (process-get process 'magit-psr-temp-ruleset)))
+    (when (and temp-file (file-exists-p temp-file))
+      (delete-file temp-file))))
+
 (defun magit-psr--parse-phpcs-output (output)
   "Parse phpcs JSON OUTPUT into list of `magit-psr-item' structs."
   (let* ((default-directory (magit-toplevel))
@@ -492,9 +569,14 @@ When set to a string, looks for that path relative to project root."
           (message "magit-psr: No PHP files found")
           nil)
       (let* ((config-file (magit-psr--find-config-file))
-             (standard-arg (if config-file
-                               (format "--standard=%s" config-file)
-                             (format "--standard=%s" magit-psr-standard)))
+             (temp-ruleset (when magit-psr-custom-rules
+                             (magit-psr--create-temp-ruleset config-file)))
+             (standard-arg (cond (temp-ruleset
+                                  (format "--standard=%s" temp-ruleset))
+                                 (config-file
+                                  (format "--standard=%s" config-file))
+                                 (t
+                                  (format "--standard=%s" magit-psr-standard))))
              (args (append (list magit-psr-executable
                                  "--report=json"
                                  standard-arg
@@ -503,7 +585,10 @@ When set to a string, looks for that path relative to project root."
                            files))
              (command (mapconcat #'shell-quote-argument args " "))
              (output (shell-command-to-string command)))
-         (magit-psr--parse-phpcs-output output)))))
+        (unwind-protect
+            (magit-psr--parse-phpcs-output output)
+          (when (and temp-ruleset (file-exists-p temp-ruleset))
+            (delete-file temp-ruleset)))))))
 
 ;;;;; JSON parsing helpers
 
