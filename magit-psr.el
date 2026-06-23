@@ -594,8 +594,12 @@ Returns the temp file path."
 
 (defun magit-psr--json-read (string)
   "Read JSON from STRING.
-Uses `json-parse-string' if available, otherwise falls back to
-`json-read-from-string'."
+Strips any trailing content after the JSON object (e.g. PHPCS 4.x
+timing output).  Uses `json-parse-string' if available, otherwise
+falls back to `json-read'."
+  ;; Strip trailing non-JSON content (PHPCS 4.x appends "Time: ...")
+  (when (string-match ".*[])}]" string)
+    (setq string (match-string 0 string)))
   (if (fboundp 'json-parse-string)
       (json-parse-string string :object-type 'hash-table :array-type 'list)
     (with-temp-buffer
