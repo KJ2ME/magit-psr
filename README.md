@@ -8,7 +8,7 @@ Inspired by [magit-todos](https://github.com/alphapapa/magit-todos), but for PHP
 
 - Emacs 26.1 or later
 - [magit](https://github.com/magit/magit) 2.13+
-- [phpcs](https://github.com/squizlabs/PHP_CodeSniffer) (PHP_CodeSniffer)
+- [phpcs](https://github.com/PHPCSStandards/PHP_CodeSniffer/) (PHP_CodeSniffer)
 
 ## Usage
 
